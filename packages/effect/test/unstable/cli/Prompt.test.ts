@@ -1266,4 +1266,65 @@ describe("Prompt.custom", () => {
       const result = yield* Prompt.run(prompt)
       assert.strictEqual(result, "xy")
     }).pipe(Effect.provide(TestLayer)))
+
+  // Regression test for https://github.com/Effect-TS/effect/issues/8088
+  // `Prompt.custom` previously displayed the `clear` output as its own `display`
+  // call *before* the next frame was rendered. During a slow render this left a
+  // blank gap (flash) between the old and new frames. The clear output and the
+  // next frame's render must be buffered and displayed together in one call.
+  it.effect("buffers clear and the next frame render into a single display call", () =>
+    Effect.gen(function*() {
+      const eventQueue = yield* Queue.make<string>()
+      const rendered = yield* Queue.make<string>()
+
+      const prompt = Prompt.custom(
+        { count: 0 },
+        Queue.asDequeue(eventQueue),
+        {
+          render: (state) =>
+            Effect.gen(function*() {
+              yield* Queue.offer(rendered, `render:${state.count}`)
+              return `Frame ${state.count}`
+            }),
+          process: (input, state) =>
+            Match.value(input).pipe(
+              Match.tag("Input", () => Effect.succeed(Action.Submit({ value: state.count }))),
+              Match.tag("Event", ({ value }) =>
+                Effect.succeed(
+                  Action.NextFrame({ state: { count: state.count + (value === "tick" ? 1 : 0) } })
+                )),
+              Match.exhaustive
+            ),
+          clear: () => Effect.succeed("CLEAR")
+        }
+      )
+
+      const fiber = yield* Prompt.run(prompt).pipe(Effect.forkChild)
+      yield* Effect.yieldNow
+
+      // Trigger a NextFrame transition, then submit to finish the loop.
+      yield* Queue.offer(eventQueue, "tick")
+      yield* Effect.yieldNow
+      yield* MockTerminal.inputKey("enter")
+
+      const result = yield* Fiber.join(fiber)
+      assert.strictEqual(result, 1)
+
+      const lines = yield* MockTerminal.displayLines
+      // The final cursor-show sequence is emitted after the loop exits and is
+      // unrelated to the frame rendering under test, so filter it out.
+      const frames = lines.filter((line) => line !== escape + "[?25h")
+      // The initial frame, then the buffered clear+frame render, then the
+      // buffered clear+submission render.
+      assert.strictEqual(frames.length, 3)
+      assert.strictEqual(frames[0], "Frame 0")
+      // The NextFrame clear output must be prepended to the next frame's render
+      // in the *same* display call (no separate, intermediate blank display).
+      assert.strictEqual(frames[1], "CLEARFrame 1")
+      // The submission keeps the same state, so the render is still "Frame 1".
+      assert.strictEqual(frames[2], "CLEARFrame 1")
+
+      const renders = yield* Queue.takeAll(rendered)
+      assert.deepStrictEqual(Array.from(renders), ["render:0", "render:1", "render:1"])
+    }).pipe(Effect.provide(TestLayer)))
 })

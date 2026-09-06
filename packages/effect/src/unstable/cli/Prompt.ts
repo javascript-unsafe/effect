@@ -1483,9 +1483,14 @@ const runLoop = Effect.fnUntraced(
   ) {
     let state = Effect.isEffect(loop.initialState) ? yield* loop.initialState : loop.initialState
     let action: Action<unknown, unknown> = Action.NextFrame({ state })
+    // Clear output is buffered and displayed together with the next frame's
+    // render, so the previous frame stays visible while the next frame is being
+    // computed (avoiding a blank flash during slow renders).
+    let pendingClear = ""
     while (true) {
       const msg = yield* loop.render(state, action)
-      yield* Effect.orDie(terminal.display(msg))
+      yield* Effect.orDie(terminal.display(pendingClear + msg))
+      pendingClear = ""
       if (loop.events) {
         const takeInput = Queue.take(input).pipe(
           Effect.map((input) => ({ _tag: "Input" as const, input }))
@@ -1503,14 +1508,14 @@ const runLoop = Effect.fnUntraced(
         case "Beep":
           continue
         case "NextFrame": {
-          yield* Effect.orDie(terminal.display(yield* loop.clear(state, action)))
+          pendingClear = yield* loop.clear(state, action)
           state = action.state
           continue
         }
         case "Submit": {
-          yield* Effect.orDie(terminal.display(yield* loop.clear(state, action)))
+          const clearOutput = yield* loop.clear(state, action)
           const msg = yield* loop.render(state, action)
-          yield* Effect.orDie(terminal.display(msg))
+          yield* Effect.orDie(terminal.display(clearOutput + msg))
           return action.value
         }
       }
